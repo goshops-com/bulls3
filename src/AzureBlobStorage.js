@@ -87,13 +87,21 @@ class AzureBlobStorage {
     await this._updateQueueMetadata(queueName, metadata => {
       if (jobData.status === 'completed') {
         metadata.inProgressJobs = metadata.inProgressJobs.filter(id => id !== jobId);
-        metadata.completedJobs.push(jobId);
+        metadata.completedJobs.push({ id: jobId, completedAt: Date.now() });
+        this._pruneCompletedJobs(metadata);
       } else if (jobData.status === 'failed') {
         metadata.inProgressJobs = metadata.inProgressJobs.filter(id => id !== jobId);
         metadata.failedJobs.push(jobId);
       }
       return metadata;
     });
+  }
+
+  _pruneCompletedJobs(metadata) {
+    const now = Date.now();
+    metadata.completedJobs = metadata.completedJobs
+      .filter(job => (now - job.completedAt) < this.completedJobRetentionPeriod)
+      .slice(-this.maxCompletedJobs);
   }
 
   async getJobData(queueName, jobId) {

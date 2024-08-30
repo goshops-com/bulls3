@@ -1,17 +1,19 @@
 const EventEmitter = require('events');
 
 class BullS3 extends EventEmitter {
-  constructor(queueName, storage) {
+  constructor(queueName, storage, config = {}) {
     super();
     this.queueName = queueName;
     this.storage = storage;
     this.isProcessing = false;
+    this.pollingInterval = config.pollingInterval || 5000; // Default to 5 seconds if not specified
+    this.processorFn = null;
+    this.pollingTimeout = null;
   }
 
   async initialize() {
     await this.storage.initialize();
     await this.storage.ensureMetadataExists(this.queueName);
-    this.startProcessing();
   }
 
   async add(jobData) {
@@ -22,14 +24,22 @@ class BullS3 extends EventEmitter {
 
   process(processorFn) {
     this.processorFn = processorFn;
+    this.startProcessing();
   }
 
   startProcessing() {
-    setInterval(() => this.processNextJob(), 1000);
+    if (this.pollingTimeout) {
+      clearTimeout(this.pollingTimeout);
+    }
+    this.processNextJob();
   }
 
   async processNextJob() {
-    if (this.isProcessing || !this.processorFn) return;
+    if (this.isProcessing || !this.processorFn) {
+      this.scheduleNextProcess();
+      return;
+    }
+
     this.isProcessing = true;
 
     try {
@@ -53,6 +63,18 @@ class BullS3 extends EventEmitter {
       console.error('Error processing job:', error);
     } finally {
       this.isProcessing = false;
+      this.scheduleNextProcess();
+    }
+  }
+
+  scheduleNextProcess() {
+    this.pollingTimeout = setTimeout(() => this.processNextJob(), this.pollingInterval);
+  }
+
+  stop() {
+    if (this.pollingTimeout) {
+      clearTimeout(this.pollingTimeout);
+      this.pollingTimeout = null;
     }
   }
 }
