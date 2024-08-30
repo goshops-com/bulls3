@@ -1,0 +1,19 @@
+{
+    "name": "bulls3",
+    "version": "1.0.0",
+    "description": "A Bull-like queue system using S3 or Azure Blob Storage",
+    "main": "src/index.js",
+    "scripts": {
+      "test": "jest"
+    },
+    "keywords": ["queue", "s3", "azure", "blob", "storage"],
+    "author": "Your Name",
+    "license": "MIT",
+    "dependencies": {
+      "aws-sdk": "^2.1165.0",
+      "@azure/storage-blob": "^12.9.0"
+    },
+    "devDependencies": {
+      "jest": "^27.4.5"
+    }
+  }
