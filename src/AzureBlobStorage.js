@@ -27,7 +27,8 @@ class AzureBlobStorage {
           waitingJobs: [],
           inProgressJobs: [],
           completedJobs: [],
-          failedJobs: []
+          failedJobs: [],
+          cronJobs: []
         };
         await blobClient.upload(JSON.stringify(initialMetadata), JSON.stringify(initialMetadata).length);
       } else {
@@ -36,10 +37,9 @@ class AzureBlobStorage {
     }
   }
 
-  async addJob(queueName, jobData) {
+  async addJob(queueName, jobId, jobData) {
     await this.ensureMetadataExists(queueName);
     
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
     const blobClient = this.containerClient.getBlockBlobClient(`${queueName}/${jobId}.json`);
     await blobClient.upload(JSON.stringify({ ...jobData, status: 'waiting' }), JSON.stringify(jobData).length);
 
@@ -73,7 +73,6 @@ class AzureBlobStorage {
           return { id: jobId, data: jobData };
         }
       } catch (error) {
-        // If there's an error processing this job, move to the next one
         continue;
       }
     }
@@ -87,8 +86,7 @@ class AzureBlobStorage {
     await this._updateQueueMetadata(queueName, metadata => {
       if (jobData.status === 'completed') {
         metadata.inProgressJobs = metadata.inProgressJobs.filter(id => id !== jobId);
-        metadata.completedJobs.push({ id: jobId, completedAt: Date.now() });
-        this._pruneCompletedJobs(metadata);
+        metadata.completedJobs.push(jobId);
       } else if (jobData.status === 'failed') {
         metadata.inProgressJobs = metadata.inProgressJobs.filter(id => id !== jobId);
         metadata.failedJobs.push(jobId);
@@ -97,18 +95,143 @@ class AzureBlobStorage {
     });
   }
 
-  _pruneCompletedJobs(metadata) {
-    const now = Date.now();
-    metadata.completedJobs = metadata.completedJobs
-      .filter(job => (now - job.completedAt) < this.completedJobRetentionPeriod)
-      .slice(-this.maxCompletedJobs);
-  }
-
   async getJobData(queueName, jobId) {
     const blobClient = this.containerClient.getBlockBlobClient(`${queueName}/${jobId}.json`);
-    const downloadResponse = await blobClient.download();
-    const downloaded = await this._streamToBuffer(downloadResponse.readableStreamBody);
-    return JSON.parse(downloaded.toString());
+    try {
+      const downloadResponse = await blobClient.download();
+      const downloaded = await this._streamToBuffer(downloadResponse.readableStreamBody);
+      return JSON.parse(downloaded.toString());
+    } catch (error) {
+      if (error.statusCode === 404) { // Not Found
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async getCronJobById(queueName, cronJobId) {
+    const blobClient = this.containerClient.getBlockBlobClient(`${queueName}/cron/${cronJobId}.json`);
+    try {
+      const downloadResponse = await blobClient.download();
+      const downloadedContent = await this._streamToBuffer(downloadResponse.readableStreamBody);
+      return JSON.parse(downloadedContent.toString());
+    } catch (error) {
+      if (error.statusCode === 404) { // Not Found
+        return null;
+      }
+      throw error;
+    }
+  }
+  
+  async getAbandonedJobs(queueName, timeout) {
+    const metadata = await this._getQueueMetadata(queueName);
+    const now = Date.now();
+    const abandonedJobs = [];
+
+    for (const jobId of metadata.inProgressJobs) {
+      const jobData = await this.getJobData(queueName, jobId);
+      if (now - jobData.lastHeartbeat > timeout) {
+        abandonedJobs.push({ id: jobId, data: jobData });
+      }
+    }
+
+    return abandonedJobs;
+  }
+
+  async addCronJob(queueName, cronJobId, cronJobInfo) {
+    const blobClient = this.containerClient.getBlockBlobClient(`${queueName}/cron/${cronJobId}.json`);
+    await blobClient.upload(JSON.stringify(cronJobInfo), JSON.stringify(cronJobInfo).length);
+
+    await this._updateQueueMetadata(queueName, metadata => {
+      if (!metadata.cronJobs) {
+        metadata.cronJobs = [];
+      }
+      metadata.cronJobs.push(cronJobId);
+      return metadata;
+    });
+  }
+
+  async getCronJobs(queueName) {
+    const metadata = await this._getQueueMetadata(queueName);
+    const cronJobs = [];
+
+    if (metadata.cronJobs) {
+      for (const cronJobId of metadata.cronJobs) {
+        const blobClient = this.containerClient.getBlockBlobClient(`${queueName}/cron/${cronJobId}.json`);
+        try {
+          const downloadResponse = await blobClient.download();
+          const downloadedContent = await this._streamToBuffer(downloadResponse.readableStreamBody);
+          cronJobs.push(JSON.parse(downloadedContent.toString()));
+        } catch (error) {
+          console.error(`Error loading cron job ${cronJobId}:`, error);
+        }
+      }
+    }
+
+    return cronJobs;
+  }
+
+  async removeCronJob(queueName, cronJobId) {
+    const blobClient = this.containerClient.getBlockBlobClient(`${queueName}/cron/${cronJobId}.json`);
+    await blobClient.delete();
+
+    await this._updateQueueMetadata(queueName, metadata => {
+      if (metadata.cronJobs) {
+        metadata.cronJobs = metadata.cronJobs.filter(id => id !== cronJobId);
+      }
+      return metadata;
+    });
+  }
+
+  async acquireLock(queueName, cronJobId, podId, duration) {
+    const lockBlobClient = this.containerClient.getBlockBlobClient(`${queueName}/locks/${cronJobId}.lock`);
+    const lockContent = JSON.stringify({ podId, expiresAt: Date.now() + duration });
+  
+    try {
+      await lockBlobClient.upload(lockContent, lockContent.length, { conditions: { ifNoneMatch: "*" } });
+      return true;
+    } catch (error) {
+      if (error.statusCode === 412) { // Precondition Failed, blob already exists
+        const existingLock = await this._getLockInfo(lockBlobClient);
+        if (existingLock && existingLock.expiresAt > Date.now()) {
+          const error = new Error('Lock already exists');
+          error.code = 'LockAlreadyExists';
+          throw error;
+        }
+        // Lock has expired, overwrite it
+        await lockBlobClient.upload(lockContent, lockContent.length, { overwrite: true });
+        return true;
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  async releaseLock(queueName, cronJobId, podId) {
+    const lockBlobClient = this.containerClient.getBlockBlobClient(`${queueName}/locks/${cronJobId}.lock`);
+    try {
+      const existingLock = await this._getLockInfo(lockBlobClient);
+      if (existingLock && existingLock.podId === podId) {
+        await lockBlobClient.delete();
+      }
+    } catch (error) {
+      if (error.statusCode !== 404) { // Not Found is okay, lock might have expired
+        throw error;
+      }
+    }
+  }
+
+  async _getLockInfo(lockBlobClient) {
+    try {
+      const downloadResponse = await lockBlobClient.download();
+      const downloadedContent = await this._streamToBuffer(downloadResponse.readableStreamBody);
+      return JSON.parse(downloadedContent.toString());
+    } catch (error) {
+      if (error.statusCode === 404) { // Not Found
+        return null;
+      }
+      throw error;
+    }
   }
 
   async _getQueueMetadata(queueName) {

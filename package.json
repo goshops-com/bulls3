@@ -4,16 +4,23 @@
     "description": "A Bull-like queue system using S3 or Azure Blob Storage",
     "main": "src/index.js",
     "scripts": {
-      "test": "jest"
+        "test": "jest"
     },
-    "keywords": ["queue", "s3", "azure", "blob", "storage"],
+    "keywords": [
+        "queue",
+        "s3",
+        "azure",
+        "blob",
+        "storage"
+    ],
     "author": "Your Name",
     "license": "MIT",
     "dependencies": {
-      "aws-sdk": "^2.1165.0",
-      "@azure/storage-blob": "^12.9.0"
+        "@azure/storage-blob": "^12.9.0",
+        "aws-sdk": "^2.1165.0",
+        "node-schedule": "^2.1.1"
     },
     "devDependencies": {
-      "jest": "^27.4.5"
+        "jest": "^27.4.5"
     }
-  }
+}
